@@ -1,0 +1,254 @@
+## Introduction
+In this project, I want to work with data sets retrieved from Airbnb. I want to explore how the rents specifically restricted in Washington D.C area releated to different factors including types of housing, locations, number of ratings, rating scores. 
+I will build a randomForest model to predicting the rent relies on locally counted factors. 
+
+One file will be used in this analysis.
+1. listings.csv (containing information from about each airbnb housings in Washington D.C Area)
+
+_1. Preparation_
+First, download the dataset from http://insideairbnb.com/get-the-data.html. The data set is in the form of CSV (comma-separated values file). And then we will use read_csv function to load the file into data frames naming listing_df. 
+```{r preparation, message=FALSE, warning=FALSE}
+library(dplyr)
+library(tidyr)
+library(tidyverse)
+
+# Load data.
+listing_df <- read_csv('listings.csv')
+head(listing_df)
+```
+
+_1.1. Looking at the Data_
+Now we got two data frames. 
+
+In listing_df, the detailed information of each housing is listed. There are some attribute relates to the page for the housing and some are descriptions wording of housing which we will remove from the data frame. The attributes that we are going maintain are:
+1. Id: the unique identification number for each housing as their primary key.
+2. Neighbourhood: the neighbourhood where the housing locates.
+3. Latitude: the latitude of the housing.
+4. Longitude: the longitude of the housing.
+5. Property type: the type of the property.
+6. Room type: the type of the room
+7. Bathrooms: the number of bathrooms.
+8. Bedrooms: the number of bedrooms.
+9. Price: the price for each night. (Note: The weekly price and the monthly price will be removed, becasue we want to keep all housing using the same scale of pricing)
+10. Number of reviews: the total number of reviews given to the housing.
+11. Reviews score rating: the average scores rating by customers (Note: the rating for individual aspects will be removed, because we will focused on their overall scores indicating the level of the housing in from all aspects).
+We will also remove missing data which is denoted as "NA", becasue we want to get the regression model to predict the rents, we should use the real data we got and disgard the missing data. 
+
+_1.2 Tidy Data_
+We will remove all attributes that will not be used in our analysis. As the type of price is character, we need to change it to double for future use by extract the dollar sign from each entity. For a better regression model, we will also remove the outliers that will affect the accuracy of our regression model.
+```{r tidy, message=FALSE, warning=FALSE}
+# Keep attributes that we want and remove entites with missing data.
+listing_df <- listing_df %>% 
+  select(id, neighbourhood_cleansed, latitude, longitude,
+         property_type, room_type, bathrooms, bedrooms, price,
+         number_of_reviews, review_scores_rating) %>%
+  mutate(neighbourhood = factor(neighbourhood_cleansed),
+         room_type = factor(room_type),
+         property_type = factor(property_type)) %>%
+  na.omit() %>%
+  select(-neighbourhood_cleansed)
+
+# Extract the dollar sign from each value of price and change it to the type double.
+listing_df$price = as.numeric(gsub("[\\$,]", "", listing_df$price))
+head(listing_df)
+```
+```{r remove, message=FALSE, warning=FALSE}
+## Check outliers
+listing_df %>%
+  ggplot(aes(x = price)) +
+  geom_histogram()
+```
+We will remove the entity with price over $1000.
+```{r remove outlier, message=FALSE, warning=FALSE}
+listing_df <- listing_df %>%
+  filter(price < 1000)
+listing_df %>%
+  ggplot(aes(x = price)) +
+  geom_histogram()
+```
+
+_2. Exploratory Data Analysis_
+Now our data is tidy and ready to be analyzed. In this part of analysis, our goal is to get more information about general trends and patterns exsiting in the data. We will look at their relationship with different factor independently.
+
+_2.1 With Respect to Neighbourhood_
+As we want to include neighbourhood as one of the factor in the model, we want to see if there is a relationship between neighbourhood and the rent.
+
+In this part we will first make a map showing the distribution of price over neighbourhoods. We will use library leaflet to create a map for Washington D.C Area, and add features to it.
+```{r map, message=FALSE, warning=FALSE}
+library(leaflet)
+library(htmltools)
+library(geojsonio)
+
+# Load the information of neighbourhoods in Washington D.C.
+neighbourhood <- geojson_read('neighbourhoods.geojson', what = 'sp')
+
+# Calculate mean price for each neighbourhood.
+stat <- listing_df %>%
+  group_by(neighbourhood) %>%
+  summarise(count = n(), mean_price = mean(price))
+
+# Create labels for each neighbourhood.
+labels <- sprintf(
+  "<strong>%s</strong><br/>Mean Price per Night: %g
+  <br/>Total Number of Housing: %d",
+  stat$neighbourhood, stat$mean_price, stat$count) %>%
+  lapply(HTML)
+
+#Create the map and adding polygons to the map based on the neighbour.
+bins <- c(0, 50, 70, 100, 150, 200, Inf)
+pal <- colorBin("YlOrRd", domain = stat$mean_price, bins = bins)
+
+dc_map <- leaflet(listing_df) %>%
+  addTiles() %>%
+  setView(lat=38.889931, lng=-77.009003, zoom=11) %>%
+  addProviderTiles("MapBox", options = providerTileOptions(
+    id = "mapbox.light",
+    accessToken = Sys.getenv('MAPBOX_ACCESS_TOKEN'))) %>%
+  addPolygons(data=neighbourhood, label = labels,
+              fillColor = ~pal(stat$mean_price),
+              weight = 2, opacity = 1,
+              color = "white", dashArray = "3",
+              fillOpacity = 0.7, highlight = highlightOptions(
+                weight = 5, color = "#666", dashArray = "",
+                fillOpacity = 0.7, bringToFront = TRUE),
+              labelOptions = labelOptions(
+                style = list(
+                  "font-weight" = "normal", padding = "3px 8px"), 
+                direction = "auto")) %>%
+  addLegend(data = stat, pal = pal, values = ~mean_price, 
+            opacity = 0.7, 
+            title = "Total number of arrests", 
+            position = "bottomright")
+dc_map
+```
+By adding inetractive polygons showing filling with color, labeling all bins in the legent, and knowing that a draker shade means the mean price per night for this neighbourhood is higher. We can see that the mean price per night for each neighbourhood vary, which indicates that there may be a relationship between the neighbourhood and the price, so the factor Neighbourhood will be keeped to find the regression model.
+
+_2.2 Bedrooms_
+In this part, we will create a boxplot showing the distribution of price across number of bedrooms. We will use funciton ggplot and geom_boxplot to create a graph with multiple boxplots, each of them indicats the distribution of price of the housing associated with that specific number of bedrooms.
+```{r bedrooms, message=FALSE, warning=FALSE}
+listing_df %>%
+  ggplot(aes(x = as.factor(bedrooms), y = price)) +
+  geom_boxplot() +
+  scale_y_continuous(labels = scales::dollar) + 
+  labs(title="Price across Number of Bedrooms",
+     x = "Number of Bedrooms",
+     y = "Price")
+```
+According to the plot, we can state that there is a trend for price to increase with the increase in number of bedrooms, therefore, we will introduce the factor Bed to our regression model to include the effect of a unit change in Bed.
+
+_2.3 With Respect to Bathrooms_
+In this part, we will create a boxplot showing the distribution of price across number of bathrooms. We will use funciton ggplot and geom_boxplot to create a graph with multiple boxplots, each of them indicats the distribution of price of the housing associated with that specific number of bathrooms.
+```{r bathrooms, message=FALSE, warning=FALSE}
+listing_df %>%
+  ggplot(aes(x = as.factor(bathrooms), y = price)) +
+  geom_boxplot() +
+  scale_y_continuous(labels = scales::dollar) + 
+  labs(title="Price across Number of Bathrooms",
+     x = "Number of Bathrooms",
+     y = "Price")
+```
+According to the plot, we can state that there is a trend for price to increase with the increase in number of bathrooms until the number of the bathroom is 6. In order to get a best regression model to predict price, we will remove the outliers assciated with more than 6 bathrooms.
+```{r outliers, message=FALSE, warning=FALSE}
+listing_df <- listing_df %>%
+  filter(bathrooms <= 6 )
+listing_df %>%
+  ggplot(aes(x = as.factor(bathrooms), y = price)) +
+  geom_boxplot() +
+  scale_y_continuous(labels = scales::dollar) + 
+  labs(title="Price across Number of Bathrooms",
+     x = "Number of Bathrooms",
+     y = "Price")
+listing_df %>%
+  ggplot(aes(x = as.factor(bedrooms), y = price)) +
+  geom_boxplot() +
+  scale_y_continuous(labels = scales::dollar) + 
+  labs(title="Price across Number of Bedrooms",
+     x = "Number of Bedrooms",
+     y = "Price")
+```
+After removing the outliers, both plots show trends for price to increase with the increase in number of bedrooms and number of bathrooms. Therefore, we will introduce the factor Bathroom to our regression model to include the effect of a unit change in Bathroom.
+
+_2.4 Number of Reviews_
+In this part, we will create a scatter plot showing the relationship between the price and the number of reviews We will use funciton ggplot and geom_points to create a graph with scatter points showing every pair of values.
+```{r num of reviews, message=FALSE, warning=FALSE}
+listing_df %>%
+  ggplot(aes(x = number_of_reviews, y = price)) +
+  geom_point() +
+  labs(title="Price across Number of Reviews",
+     x = "Number of Revews",
+     y = "Price")
+```
+The above scatter plot did not show a trend for price to increase with the increase in number of reviews, so we will remove this factor from our regression line for a better regression model.
+
+_2.5 Rating Score_
+In this part, we will create a boxplot showing the distribution of price across number of reviews We will use funciton ggplot and geom_boxplot to create a graph with multiple boxplots, each of them indicats the distribution of price of the housing associated with that specific number of reviews
+```{r rating score, message=FALSE, warning=FALSE}
+listing_df %>%
+  ggplot(aes(x = as.factor(review_scores_rating), y = price)) +
+  geom_boxplot() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+    labs(title="Price across Number of Reviews",
+     x = "Number of Revews",
+     y = "Price")
+```
+The above scatter plot did not show a trend for price to increase with the increase in number of reviews, so we will remove this factor from our regression line for a better regression model.
+
+Now, we get our three factor to introduce to the regression model, which are bedrooms, bathrooms and neighborhood. We will perform random forest algorithm on it to classify the indicators for the response variable price and get the regression line.
+_3 Machine Learning_
+In this part, we will try to find the best regression model using two different ways, first we will use random forest algorithm with ntree = 500, to find the 
+
+_3.1 Random Forest_
+We divide the dataframes into traning part and testing part, we will build the regression model based on the tranining part. and then predict the response variable using the data from the testing part.
+```{r random forest, message=FALSE, warning=FALSE}
+library(randomForest)
+library(broom)
+set.seed(1234)
+indexes <- floor(nrow(listing_df)/2)
+
+train <- listing_df[1:indexes,]
+test <- listing_df[(indexes+1):nrow(listing_df),]
+
+listing_rf <- randomForest(
+  price ~ neighbourhood * bedrooms * bathrooms,
+  data = train,
+  importance = TRUE)
+listing_rf
+
+test_predictions <- predict(listing_rf, newdata=test)
+
+test %>%
+  ggplot(aes(x = price, y = test_predictions)) +
+  geom_point() +
+  geom_smooth(method = lm)
+```
+The Prediction vs price scatter plot show the how the regression model works. The regressio line we got here shows that our model works not really well as the points falls part from the line.
+
+Now we will use logistic regression line to find the regression model for this data frame. First we find a linear regression model with all predictor with order of at most one. And then we will build a linear regression model incuding the interaction and preform a hypothesis test on it.
+```{r regression, message=FALSE, warning=FALSE}
+library(broom)
+fit <- lm(price ~ neighbourhood + bedrooms + bathrooms, data = listing_df)
+fit_stats <- fit %>% tidy()
+fit_stats
+
+fit %>%
+  augment() %>%
+  ggplot(aes(x=factor(neighbourhood), y=.resid)) +
+    geom_violin() +
+    labs(title="Residuals vs neighourhood",
+         x = "neighbourhood",
+         y = "Residual")
+
+fit2 <- lm(price ~ neighbourhood*bedrooms*bathrooms, data = listing_df)
+fit2_stats <- fit2 %>% tidy()
+fit2_stats
+
+anova_tb <- anova(fit, fit2)
+anova_tb
+```
+From the residuals vs neighbourhood, we can see that the regression met the assumptions for a linear regression. And by the anova table we got by comparing two model, we know that the second one with interation works better for this problem. 
+```{r line, message=FALSE, warning=FALSE}
+fit2_stats <- fit2_stats %>%
+  filter(p.value < 0.05)
+fit2_stats
+```
+This will be the final regression model we got.
